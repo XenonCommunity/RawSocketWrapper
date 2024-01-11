@@ -1,4 +1,4 @@
-module RawSocketWrapper
+module github.com/SlangWare-Development/RawSocketWrapper
 
 go 1.21
 
