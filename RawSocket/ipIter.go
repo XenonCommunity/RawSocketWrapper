@@ -19,6 +19,9 @@ type IPIterator struct {
 
 // ToIPIterator creates a new instance of IPIterator with the given data.
 func ToIPIterator(data ...string) *IPIterator {
+	if len(data) == 0 {
+		panic("No data provided")
+	}
 	return &IPIterator{
 		containers: parseData(data),
 	}
@@ -26,10 +29,10 @@ func ToIPIterator(data ...string) *IPIterator {
 
 // parseData parses a slice of strings and returns a slice of netContainers.
 func parseData(data []string) []netContainer {
-	var pars []netContainer
+	var containers []netContainer
 
 	for _, x := range data {
-		if strings.Contains(x, "-") {
+		if strings.ContainsRune(x, '-') {
 			// If the string contains a "-", split it into two parts.
 			n := strings.SplitN(x, "-", 2)
 
@@ -37,22 +40,32 @@ func parseData(data []string) []netContainer {
 			start := net.ParseIP(n[0])
 			end := net.ParseIP(n[1])
 
-			// Append the netContainer to the pars slice.
-			pars = append(pars, netContainer{start: start, end: end})
+			// Append the netContainer to the containers slice.
+			containers = append(containers, netContainer{start: start, end: end})
 			continue
 		}
 
-		// If the string is not in the format "x.x.x.x/y", skip it.
-		start, end, err := cidrStartEnd(x)
-		if err != nil {
+		if strings.ContainsRune(x, '/') {
+			// If the string is not in the format "x.x.x.x/y", skip it.
+			start, end, err := cidrStartEnd(x)
+			if err != nil {
+				continue
+			}
+
+			// Append the netContainer to the containers slice.
+			containers = append(containers, netContainer{start: start, end: end})
 			continue
 		}
 
-		// Append the netContainer to the pars slice.
-		pars = append(pars, netContainer{start: start, end: end})
+		if ip := net.ParseIP(x); ip == nil {
+			continue
+		} else {
+			containers = append(containers, netContainer{start: ip, end: ip})
+		}
+
 	}
 
-	return pars
+	return containers
 }
 
 // cidrStartEnd returns the start and end IP addresses of a given CIDR range.
@@ -82,38 +95,26 @@ func cidrStartEnd(cidr string) (net.IP, net.IP, error) {
 // Next returns the next IP in the iterator.
 func (it *IPIterator) Next() net.IP {
 	// If at the start of the iterator, reset the iterator.
-	if it.atStart() {
-		it.resetIterator()
+	if it.currentIdx == -1 || it.currentIP == nil {
+		it.currentIdx = 0
+		it.currentIP = it.currentContainer().start
+		return it.currentIP
 	}
 
-	cont := it.currentContainer()
+	container := it.currentContainer()
 
 	// If at the end of the current container, move to the next container.
-	if it.atEndOfContainer(cont) {
+	if it.atEndOfContainer(container) {
 		return it.moveToNextContainer()
 	}
 
 	// If the current IP is valid within the container's range, return it.
-	if it.isValidIPInRange(cont) {
-		return it.getNextIP(cont)
+	if it.isValidIPInRange(container) {
+		return it.getNextIP(container)
 	}
 
 	// If no valid IP is found, return nil.
 	return nil
-}
-
-// atStart checks if the iterator is at the start position.
-// Returns true if the iterator is at the start, false otherwise.
-func (it *IPIterator) atStart() bool {
-	// Check if the current index is -1 or if the current IP is nil.
-	return it.currentIdx == -1 || it.currentIP == nil
-}
-
-// resetIterator resets the iterator to its initial state.
-// This function sets the current index to 0 and the current IP to the start IP of the first container.
-func (it *IPIterator) resetIterator() {
-	it.currentIdx = 0
-	it.currentIP = it.containers[0].start
 }
 
 // currentContainer returns the current netContainer object that the iterator is pointing to.
@@ -137,10 +138,10 @@ func (it *IPIterator) moveToNextContainer() net.IP {
 	}
 
 	// Set the current IP to the start IP of the next container
-	it.currentIP = it.containers[it.currentIdx].start
+	it.currentIP = it.currentContainer().start
 
 	// Return the end IP of the previous container
-	return it.containers[it.currentIdx-1].end
+	return it.currentIP
 }
 
 // isValidIPInRange checks if the current IP address in the iterator is within the range of a given network container.
@@ -162,7 +163,14 @@ func (it *IPIterator) getNextIP(cont netContainer) net.IP {
 }
 
 // incrementIP increments the currentIP of the IPIterator.
+// If the currentIP is nil, it sets the currentIP to the start IP of the current container.
+// Otherwise, it increments the currentIP by one.
 func (it *IPIterator) incrementIP() {
+	if it.currentIP == nil {
+		it.currentIP = it.currentContainer().start
+		return
+	}
+
 	it.currentIP = incIP(it.currentIP)
 }
 
@@ -215,23 +223,17 @@ func ipLessOrEqual(ip, ip2 net.IP) bool {
 
 // HasNext returns true if there is a next IP address in the iterator.
 func (it *IPIterator) HasNext() bool {
-	// If the current index is negative or the current IP address is nil, there is a next IP address.
-	if it.currentIdx < 0 || it.currentIP == nil {
-		return true
-	}
-
 	// If the current index is greater than or equal to the number of containers, there is no next IP address.
 	if it.currentIdx >= len(it.containers) {
 		return false
 	}
 
 	// Get the current container.
-	container := it.containers[it.currentIdx]
+	container := it.currentContainer()
 
 	// If the current IP address is equal to the end IP address of the container, move to the next container.
 	if it.currentIP.Equal(container.end) {
-		it.moveToNextContainer()
-		return it.currentIdx < len(it.containers)
+		return it.currentIdx+1 < len(it.containers)
 	}
 
 	// There is a next IP address.
