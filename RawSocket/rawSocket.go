@@ -58,11 +58,16 @@ type ICMP struct {
 	RandomizedPayloadLength int
 }
 
+type WrappedPacket struct {
+	*net.IPAddr
+	gopacket.Packet
+}
+
 type RawSocket interface {
 	Write([]byte, net.Addr) (int, error)
 	Read([]byte) (int, net.Addr, error)
-	NextPacket() (gopacket.Packet, error)
-	Iter() chan gopacket.Packet
+	NextPacket() (gopacket.Packet, *net.IPAddr, error)
+	Iter() chan WrappedPacket
 	Close() error
 }
 

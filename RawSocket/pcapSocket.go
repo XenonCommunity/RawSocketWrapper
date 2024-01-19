@@ -207,47 +207,12 @@ func createSerializeBuffer(isRaw bool, layer3, layer4 gopacket.SerializableLayer
 }
 
 // NextPacket returns the next packet from the PcapSocket.
-func (p *PcapSocket) NextPacket() (gopacket.Packet, error) {
-	return p.source.NextPacket()
-}
-
-func (p *PcapSocket) Iter() chan gopacket.Packet {
-	// Create a buffered channel with a capacity of 1024.
-	packets := make(chan gopacket.Packet, 1024)
-	// Start a goroutine that will call the startIter method and pass the packets channel.
-	go p.startIter(packets)
-	// Return the packets channel.
-	return packets
-}
-
-// startIter starts iterating over packets from the PcapSocket and sends them to the provided channel.
-func (p *PcapSocket) startIter(packets chan gopacket.Packet) {
-	defer func() {
-		_ = recover()
-	}()
-
-	// Continuously read packets from the PcapSocket until the channel is closed.
-	for packets != nil {
-		// Get the next packet from the PcapSocket.
-		packet, err := p.NextPacket()
-		if err != nil {
-			continue
-		}
-
-		// Send the packet to the packets channel.
-		packets <- packet
-	}
-}
-
-// Read reads bytes from the packet socket and returns the number of bytes read,
-// the source address of the packet, and any error encountered.
-// It uses the provided byte slice to copy the data read from the packet.
-func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
-	// Iterate over packets received from the source
+func (p *PcapSocket) NextPacket() (gopacket.Packet, *net.IPAddr, error) {
 	for {
 		packet, err := p.source.NextPacket()
+
 		if err != nil {
-			return 0, nil, err
+			panic(err)
 		}
 
 		var ipAddr net.IP
@@ -283,6 +248,54 @@ func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
 			}
 		}
 
+		return nil, &net.IPAddr{IP: ipAddr}, err
+
+	}
+	return nil, nil, NoPacketAvailableErr
+}
+
+func (p *PcapSocket) Iter() chan WrappedPacket {
+	// Create a buffered channel with a capacity of 1024.
+	packets := make(chan WrappedPacket, 1024)
+	// Start a goroutine that will call the startIter method and pass the packets channel.
+	go p.startIter(packets)
+	// Return the packets channel.
+	return packets
+}
+
+// startIter starts iterating over packets from the PcapSocket and sends them to the provided channel.
+func (p *PcapSocket) startIter(packets chan WrappedPacket) {
+	defer func() {
+		_ = recover()
+	}()
+
+	// Continuously read packets from the PcapSocket until the channel is closed.
+	for packets != nil {
+		// Get the next packet from the PcapSocket.
+		packet, addr, err := p.NextPacket()
+		if err != nil {
+			continue
+		}
+
+		// Send the packet to the packets channel.
+		packets <- WrappedPacket{
+			IPAddr: addr,
+			Packet: packet,
+		}
+	}
+}
+
+// Read reads bytes from the packet socket and returns the number of bytes read,
+// the source address of the packet, and any error encountered.
+// It uses the provided byte slice to copy the data read from the packet.
+func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
+	// Iterate over packets received from the source
+	for {
+		packet, addr, err := p.NextPacket()
+		if err != nil {
+			return 0, nil, err
+		}
+
 		var data []byte
 
 		// Extract the data from the packet based on the specified protocol
@@ -309,7 +322,7 @@ func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
 
 		// Copy the data to the provided byte slice
 		copy(bytes, data)
-		return len(data), &net.IPAddr{IP: ipAddr}, nil
+		return len(data), addr, nil
 	}
 
 	// If no packet is available, return an error
