@@ -1,6 +1,7 @@
 package RawSocket
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -100,4 +101,26 @@ func GetSelfIP() net.IP {
 
 	// Return the final selfIP
 	return selfIP
+}
+
+func getInterfaceByIP(ip net.IP) (*net.Interface, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.Equal(ip) {
+				return &iface, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no interface found for IP address: %s", ip)
 }

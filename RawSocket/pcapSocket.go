@@ -3,108 +3,31 @@
 package RawSocket
 
 import (
-	"errors"
-	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+
+	"errors"
+	"fmt"
 	"net"
 	"strings"
-	"sync"
-	"time"
+	"syscall"
 )
 
-type ProtocolType int
+var NoPacketAvailableErr = errors.New("no packet available")
 
 //goland:noinspection GoUnusedGlobalVariable,GoSnakeCaseUsage
 var (
-	IPPROTO_TCP  = ProtocolType(0x1)
-	IPPROTO_UDP  = ProtocolType(0x2)
-	IPPROTO_ICMP = ProtocolType(0x3)
-	IPPROTO_RAW  = ProtocolType(0x4)
-	IPPROTO_IP   = ProtocolType(0x5)
+	IPPROTO_TCP  = ProtocolType(syscall.IPPROTO_TCP)
+	IPPROTO_UDP  = ProtocolType(syscall.IPPROTO_UDP)
+	IPPROTO_ICMP = ProtocolType(0x1)
+	IPPROTO_RAW  = ProtocolType(0xFF)
+	IPPROTO_IP   = ProtocolType(syscall.IPPROTO_IP)
 )
 
 var NetworkDevice *pcap.Interface
 var SysSrcMac *net.HardwareAddr
 var RouterMac *net.HardwareAddr
-
-type PacketQueue struct {
-	Packets   []gopacket.Packet
-	MaxSize   int
-	mx        *sync.Mutex
-	broadcast *sync.Cond
-}
-
-// NewPacketQueue returns a new instance of PacketQueue with the given max size.
-func NewPacketQueue(maxSize int) *PacketQueue {
-	// Create a new PacketQueue object with the specified max size and initialize its fields.
-	return &PacketQueue{
-		MaxSize:   maxSize,
-		Packets:   make([]gopacket.Packet, 0, maxSize),
-		broadcast: sync.NewCond(new(sync.Mutex)),
-		mx:        new(sync.Mutex),
-	}
-}
-
-// Add adds a packet to the PacketQueue.
-func (q *PacketQueue) Add(packet gopacket.Packet) {
-	// Acquire the lock to ensure exclusive access to the queue.
-	q.broadcast.L.Lock()
-	defer q.broadcast.L.Unlock()
-
-	// Add the packet to the queue.
-	q.Packets = append(q.Packets, packet)
-
-	// If the queue exceeds the maximum size, remove the oldest packet.
-	if len(q.Packets) > q.MaxSize {
-		q.Packets = q.Packets[1:]
-	}
-
-	// Signal that a new packet has been added to the queue.
-	q.broadcast.Signal()
-}
-
-// Poll removes and returns the next packet from the packet queue.
-// If the queue is empty, it waits for a packet to be added to the queue.
-func (q *PacketQueue) Poll() gopacket.Packet {
-	q.mx.Lock()
-	defer q.mx.Unlock()
-
-	q.broadcast.L.Lock()
-	defer q.broadcast.L.Unlock()
-
-	// Wait for a packet to be added to the queue
-	for len(q.Packets) == 0 {
-		q.broadcast.Wait()
-	}
-
-	// Get the first packet in the queue
-	packet := q.Packets[0]
-	q.Packets = q.Packets[1:]
-
-	return packet
-}
-
-// Len returns the length of the PacketQueue.
-func (q *PacketQueue) Len() int {
-	// Lock the mutex to ensure exclusive access to the PacketQueue.
-	q.mx.Lock()
-	defer q.mx.Unlock()
-
-	// Return the length of the PacketQueue.
-	return len(q.Packets)
-}
-
-// Clear removes all packets from the packet queue.
-func (q *PacketQueue) Clear() {
-	// Acquire the lock to ensure exclusive access to the packet queue.
-	q.mx.Lock()
-	defer q.mx.Unlock()
-
-	// Create a new empty slice of packets with the same capacity as the original slice.
-	q.Packets = make([]gopacket.Packet, 0, q.MaxSize)
-}
 
 // init initializes the network device.
 func init() {
@@ -136,22 +59,20 @@ func init() {
 	}
 }
 
-// startSniffer starts the packet sniffer using the provided handle and adds packets to the receiver queue.
-// If an error occurs during packet processing, it recovers and clears the receiver queue before re-throwing the error.
-func startSniffer(handle *pcap.Handle, receiver *PacketQueue) {
-	// Recover from any panics and clear the receiver queue before re-throwing the error
-	defer func() {
-		if err := recover(); err != nil {
-			receiver.Clear()
-			panic(err)
-		}
-	}()
-
-	// Create a packet source from the handle
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+// waitForMac waits for a packet that contains the MAC address of the router.
+// It takes a pcap.Handle as input and returns nothing.
+// The function processes each packet from the packet source until it finds a packet with the MAC address.
+func waitForMac(packetSource *gopacket.PacketSource) {
+	// Get the IP address of the current device
+	ip := GetSelfIP()
 
 	// Process each packet from the packet source
-	for packet := range packetSource.Packets() {
+	for {
+		packet, err := packetSource.NextPacket()
+		if err != nil {
+			return
+		}
+
 		// Check if the packet has an IPv4 layer
 		if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 			// Check if RouterMac is not set
@@ -159,37 +80,34 @@ func startSniffer(handle *pcap.Handle, receiver *PacketQueue) {
 				// Check if the packet has an Ethernet layer
 				if ethernetLayer := packet.Layer(layers.LayerTypeEthernet); ethernetLayer != nil {
 					// Check if the source IP of the packet is equal to GetSelfIP()
-					if ipLayer.(*layers.IPv4).SrcIP.Equal(GetSelfIP()) {
+					if ipLayer.(*layers.IPv4).SrcIP.Equal(ip) {
 						ethernet := ethernetLayer.(*layers.Ethernet)
 
+						// Set the source MAC address and the router MAC address
 						SysSrcMac = &ethernet.SrcMAC
 						RouterMac = &ethernet.DstMAC
+						return
 					}
 				}
-			}
-
-			// Check if the source IP of the packet is not equal to GetSelfIP()
-			if !ipLayer.(*layers.IPv4).SrcIP.Equal(GetSelfIP()) {
-				receiver.Add(packet)
 			}
 		}
 	}
 }
 
 type PcapSocket struct {
+	*pcap.Handle
 	isRaw    bool
-	handle   *pcap.Handle
-	receiver *PacketQueue
 	protocol ProtocolType
+	source   *gopacket.PacketSource
 }
 
 // newPcapSocket creates a new PcapSocket with the given parameters.
-func newPcapSocket(isRaw bool, handle *pcap.Handle, receiver *PacketQueue, protocol ProtocolType) *PcapSocket {
+func newPcapSocket(isRaw bool, handle *pcap.Handle, protocol ProtocolType, source *gopacket.PacketSource) *PcapSocket {
 	return &PcapSocket{
 		isRaw:    isRaw,
-		handle:   handle,
-		receiver: receiver,
+		Handle:   handle,
 		protocol: protocol,
+		source:   source,
 	}
 }
 
@@ -211,7 +129,7 @@ func (p *PcapSocket) Write(bytes []byte, addr net.Addr) (int, error) {
 
 	// Write the packet data if the bytes contain an Ethernet header
 	if hasEthernet(bytes) {
-		if err := p.handle.WritePacketData(bytes); err != nil {
+		if err := p.WritePacketData(bytes); err != nil {
 			return 0, err
 		}
 		return len(bytes), nil
@@ -234,7 +152,7 @@ func (p *PcapSocket) Write(bytes []byte, addr net.Addr) (int, error) {
 
 	// Create a serialize buffer and write the buffer data to the handle
 	buffer := createSerializeBuffer(p.isRaw, layer3, layer4)
-	if err := p.handle.WritePacketData(buffer.Bytes()); err != nil {
+	if err := p.WritePacketData(buffer.Bytes()); err != nil {
 		return 0, err
 	}
 
@@ -288,49 +206,86 @@ func createSerializeBuffer(isRaw bool, layer3, layer4 gopacket.SerializableLayer
 	return buffer
 }
 
-// Read reads packets from the pcap socket and copies the data to the provided byte slice.
-// It returns the number of bytes read, the source address of the packet, and any error encountered.
-func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
-	for {
-		packet := p.receiver.Poll()
+// NextPacket returns the next packet from the PcapSocket.
+func (p *PcapSocket) NextPacket() (gopacket.Packet, error) {
+	return p.source.NextPacket()
+}
 
-		if packet == nil {
-			return 0, nil, errors.New("no packet available")
+func (p *PcapSocket) Iter() chan gopacket.Packet {
+	// Create a buffered channel with a capacity of 1024.
+	packets := make(chan gopacket.Packet, 1024)
+	// Start a goroutine that will call the startIter method and pass the packets channel.
+	go p.startIter(packets)
+	// Return the packets channel.
+	return packets
+}
+
+// startIter starts iterating over packets from the PcapSocket and sends them to the provided channel.
+func (p *PcapSocket) startIter(packets chan gopacket.Packet) {
+	defer func() {
+		_ = recover()
+	}()
+
+	// Continuously read packets from the PcapSocket until the channel is closed.
+	for packets != nil {
+		// Get the next packet from the PcapSocket.
+		packet, err := p.NextPacket()
+		if err != nil {
+			continue
 		}
 
+		// Send the packet to the packets channel.
+		packets <- packet
+	}
+}
+
+// Read reads bytes from the packet socket and returns the number of bytes read,
+// the source address of the packet, and any error encountered.
+// It uses the provided byte slice to copy the data read from the packet.
+func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
+	// Iterate over packets received from the source
+	for {
+		packet, err := p.source.NextPacket()
+		if err != nil {
+			return 0, nil, err
+		}
+
+		var ipAddr net.IP
+
+		// Extract the source IP address from the packet
+		if Ip4Layer := packet.Layer(layers.LayerTypeIPv4); Ip4Layer != nil {
+			ipAddr = Ip4Layer.(*layers.IPv4).SrcIP
+		} else if Ip6Layer := packet.Layer(layers.LayerTypeIPv6); Ip6Layer != nil {
+			ipAddr = Ip6Layer.(*layers.IPv6).SrcIP
+		}
+
+		// Check if the packet matches the specified protocol
 		switch p.protocol {
 		case IPPROTO_TCP:
-			// Skip packets that are not TCP
-			if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer == nil {
+			if packet.Layer(layers.LayerTypeTCP) == nil {
 				continue
 			}
 		case IPPROTO_UDP:
-			// Skip packets that are not UDP
-			if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer == nil {
+			if packet.Layer(layers.LayerTypeUDP) == nil {
+				continue
+			}
+		case IPPROTO_IP:
+			if packet.Layer(layers.LayerTypeIPv4) == nil || packet.Layer(layers.LayerTypeIPv6) == nil {
+				continue
+			}
+		case IPPROTO_ICMP:
+			if packet.Layer(layers.LayerTypeICMPv4) == nil || packet.Layer(layers.LayerTypeICMPv6) == nil {
 				continue
 			}
 		default:
-			// Skip packets that are not TCP, UDP, or Raw
 			if p.protocol != IPPROTO_RAW {
 				continue
 			}
 		}
 
-		var ipAddr net.IP
-
-		switch packet := packet.(type) {
-		case gopacket.Packet:
-			if Ip4Layer := packet.Layer(layers.LayerTypeIPv4); Ip4Layer != nil {
-				// Get the source IP address from IPv4 packet
-				ipAddr = Ip4Layer.(*layers.IPv4).SrcIP
-			} else if Ip6Layer := packet.Layer(layers.LayerTypeIPv6); Ip6Layer != nil {
-				// Get the source IP address from IPv6 packet
-				ipAddr = Ip6Layer.(*layers.IPv6).SrcIP
-			}
-		}
-
 		var data []byte
 
+		// Extract the data from the packet based on the specified protocol
 		switch p.protocol {
 		case IPPROTO_UDP, IPPROTO_TCP:
 			// Get the transport layer data for UDP or TCP packets
@@ -356,12 +311,15 @@ func (p *PcapSocket) Read(bytes []byte) (int, net.Addr, error) {
 		copy(bytes, data)
 		return len(data), &net.IPAddr{IP: ipAddr}, nil
 	}
+
+	// If no packet is available, return an error
+	return 0, nil, NoPacketAvailableErr
 }
 
 // Close closes the PcapSocket by closing the underlying handle.
 // It returns an error if there was a problem closing the handle.
 func (p *PcapSocket) Close() error {
-	p.handle.Close()
+	p.Handle.Close()
 	return nil
 }
 
@@ -374,39 +332,26 @@ func OpenRawSocket(protocol ProtocolType) (RawSocket, error) {
 		return nil, err
 	}
 
-	// Create a packet queue to store received packets.
-	receiver := NewPacketQueue(256)
-
-	// Start a goroutine to capture packets and enqueue them into the receiver queue.
-	go startSniffer(handle, receiver)
-
 	// Flag to determine if IP raw mode is needed.
 	var ipRaw bool
 
-	// Loop until the source MAC address is updated.
-	for SysSrcMac == nil {
-		// Update the MAC address.
-		if err := updateMac(handle); err != nil {
-			// If the error indicates mismatched hardware address sizes, set the IP raw flag.
-			if strings.Contains(err.Error(), "mismatched hardware address sizes") {
-				ipRaw = true
-				break
-			}
-			// Panic if there is any other error.
-			panic(err)
+	// Update the MAC address.
+	if err := updateMac(handle); err != nil {
+		if strings.Contains(err.Error(), "mismatched hardware address sizes") {
+			ipRaw = true
 		}
-
-		// Exit the loop if the MAC address is updated.
-		if SysSrcMac != nil {
-			break
-		}
-
-		// Sleep for 1 second and try again.
-		time.Sleep(1 * time.Second)
+		// Panic if there is any other error.
+		panic(err)
 	}
 
+	source := gopacket.NewPacketSource(handle, handle.LinkType())
+	source.NoCopy = true
+	source.DecodeOptions = decodeOptions
+
+	waitForMac(source)
+
 	// Create a new PcapSocket with the necessary parameters.
-	return newPcapSocket(ipRaw, handle, receiver, protocol), nil
+	return newPcapSocket(ipRaw, handle, protocol, source), nil
 }
 
 // isIPv4 checks if the given byte slice represents an IPv4 address.

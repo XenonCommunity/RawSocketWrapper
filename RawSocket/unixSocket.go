@@ -3,13 +3,14 @@
 package RawSocket
 
 import (
+	"github.com/google/gopacket"
+	"math"
+
 	"net"
 	"os"
 	"strconv"
 	"syscall"
 )
-
-type ProtocolType int
 
 //goland:noinspection GoUnusedGlobalVariable,GoSnakeCaseUsage
 var (
@@ -21,12 +22,24 @@ var (
 )
 
 type UnixSocket struct {
-	conn net.PacketConn
+	conn     net.PacketConn
+	protocol ProtocolType
+}
+
+var mtu = math.MaxInt16
+
+func init() {
+	iface, err := getInterfaceByIP(GetSelfIP())
+	if err != nil {
+		panic(err)
+	}
+
+	mtu = iface.MTU + 1
 }
 
 // newUnixSocket creates a new UnixSocket instance with the given PacketConn.
-func newUnixSocket(conn net.PacketConn) *UnixSocket {
-	return &UnixSocket{conn: conn}
+func newUnixSocket(conn net.PacketConn, protocol ProtocolType) *UnixSocket {
+	return &UnixSocket{conn: conn, protocol: protocol}
 }
 
 // Write writes the given bytes to the specified address using the UnixSocket connection.
@@ -48,6 +61,60 @@ func (u *UnixSocket) Read(bytes []byte) (int, net.Addr, error) {
 func (u *UnixSocket) Close() error {
 	return u.conn.Close()
 }
+func getMTU(interfaceName string) (int, error) {
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return 0, err
+	}
+
+	return iface.MTU, nil
+}
+
+// NextPacket reads the next packet from the UnixSocket.
+// It returns the packet as a gopacket.Packet and any error encountered.
+func (u *UnixSocket) NextPacket() (gopacket.Packet, error) {
+	// Create a byte slice with the maximum possible length of a packet.
+	packetData := make([]byte, mtu)
+
+	// Read the packet data into the byte slice.
+	n, _, err := u.Read(packetData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a new packet using the packet data and the LinkType of the UnixSocket.
+	// Set the NoCopy option to indicate that the packet should not be copied.
+	return gopacket.NewPacket(packetData[:n], u.protocol.LinkType(), gopacket.NoCopy), nil
+}
+
+// Iter returns a channel that will receive gopacket.Packet objects.
+func (u *UnixSocket) Iter() chan gopacket.Packet {
+	// Create a buffered channel with a capacity of 1024.
+	packets := make(chan gopacket.Packet, 1024)
+	// Start a goroutine that will call the startIter method and pass the packets channel.
+	go u.startIter(packets)
+	// Return the packets channel.
+	return packets
+}
+
+// startIter starts iterating over packets from the PcapSocket and sends them to the provided channel.
+func (u *UnixSocket) startIter(packets chan gopacket.Packet) {
+	defer func() {
+		_ = recover()
+	}()
+
+	// Continuously read packets from the PcapSocket until the channel is closed.
+	for packets != nil {
+		// Get the next packet from the PcapSocket.
+		packet, err := u.NextPacket()
+		if err != nil {
+			continue
+		}
+
+		// Send the packet to the packets channel.
+		packets <- packet
+	}
+}
 
 // OpenRawSocket opens a raw socket for the specified protocol.
 // It returns a pointer to RawSocket and an error, if any.
@@ -62,6 +129,7 @@ func OpenRawSocket(protocol ProtocolType) (RawSocket, error) {
 	if err := syscall.SetsockoptInt(sock, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
 		return nil, err
 	}
+
 	if err := syscall.SetsockoptInt(sock, syscall.IPPROTO_IP, syscall.SO_REUSEADDR, 1); err != nil {
 		return nil, err
 	}
@@ -73,5 +141,5 @@ func OpenRawSocket(protocol ProtocolType) (RawSocket, error) {
 	}
 
 	// Create a RawSocket instance and return it
-	return newUnixSocket(conn), nil
+	return newUnixSocket(conn, protocol), nil
 }

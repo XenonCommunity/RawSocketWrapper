@@ -16,28 +16,21 @@ func validPort(port int) int {
 	return port
 }
 
-// randomTimestamp returns a byte slice representing a random timestamp.
+// randomTimestamp generates a random timestamp and returns it as a byte slice.
 func randomTimestamp() []byte {
-	// Generate a random timestamp value using the current Unix time in nanoseconds.
-	val := uint32(time.Now().UnixNano())
+	// Get the current Unix time in nanoseconds.
+	unixNano := time.Now().UnixNano()
 
-	// Initialize a secret value.
-	secr := uint32(0)
+	// Convert the Unix time to a uint32 value.
+	val := uint32(unixNano)
 
-	// Create a byte slice with a length of 8 to store the timestamp data.
+	// Create a byte slice to store the timestamp data.
 	timestampData := make([]byte, 8)
 
-	// Extract and store the four bytes of the timestamp value in the byte slice.
-	timestampData[0] = byte(val >> 24)
-	timestampData[1] = byte(val >> 16)
-	timestampData[2] = byte(val >> 8)
-	timestampData[3] = byte(val)
-
-	// Extract and store the four bytes of the secret value in the byte slice.
-	timestampData[4] = byte(secr >> 24)
-	timestampData[5] = byte(secr >> 16)
-	timestampData[6] = byte(secr >> 8)
-	timestampData[7] = byte(secr)
+	// Split the uint32 value into four bytes and store them in the byte slice.
+	for i := 0; i < 4; i++ {
+		timestampData[i] = byte(val >> ((3 - i) * 8))
+	}
 
 	// Return the byte slice representing the random timestamp.
 	return timestampData

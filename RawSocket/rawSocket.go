@@ -8,6 +8,34 @@ import (
 	"net"
 )
 
+type ProtocolType int
+
+// LinkType returns the corresponding gopacket.Decoder for the given ProtocolType.
+func (t ProtocolType) LinkType() gopacket.Decoder {
+	switch t {
+	case IPPROTO_UDP:
+		return layers.LayerTypeUDP
+	case IPPROTO_ICMP:
+		// Check if the IP address is IPv4 or IPv6
+		ip := GetSelfIP()
+		if ip.To4() != nil {
+			return layers.LayerTypeICMPv4
+		}
+		return layers.LayerTypeICMPv6
+	case IPPROTO_TCP:
+		return layers.LayerTypeTCP
+	case IPPROTO_IP:
+		// Check if the IP address is IPv4 or IPv6
+		ip := GetSelfIP()
+		if ip.To4() != nil {
+			return layers.LayerTypeIPv4
+		}
+		return layers.LayerTypeIPv6
+	default:
+		return layers.LayerTypeEthernet
+	}
+}
+
 type TCP struct {
 	SYN, ACK, RST, PSH, FIN, URG, ECE, CWR, NS bool
 	Payload                                    []byte
@@ -33,6 +61,8 @@ type ICMP struct {
 type RawSocket interface {
 	Write([]byte, net.Addr) (int, error)
 	Read([]byte) (int, net.Addr, error)
+	NextPacket() (gopacket.Packet, error)
+	Iter() chan gopacket.Packet
 	Close() error
 }
 
