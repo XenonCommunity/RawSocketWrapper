@@ -1,6 +1,7 @@
 package RawSocket
 
 import (
+	"math/rand/v2"
 	"net"
 	"strings"
 )
@@ -115,6 +116,13 @@ func (it *IPIterator) Next() net.IP {
 
 	// If no valid IP is found, return nil.
 	return nil
+}
+
+func (it *IPIterator) Shuffle() {
+	// Shuffle the containers
+	rand.Shuffle(len(it.containers), func(i, j int) {
+		it.containers[i], it.containers[j] = it.containers[j], it.containers[i]
+	})
 }
 
 // currentContainer returns the current netContainer object that the iterator is pointing to.
