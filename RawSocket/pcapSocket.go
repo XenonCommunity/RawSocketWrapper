@@ -6,11 +6,12 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"strings"
+	"sync"
 
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"syscall"
 )
 
@@ -25,11 +26,16 @@ var (
 	IPPROTO_IP   = ProtocolType(syscall.IPPROTO_IP)
 )
 
-var NetworkDevice *pcap.Interface
-var SysSrcMac *net.HardwareAddr
-var RouterMac *net.HardwareAddr
+var (
+	NetworkDevice *pcap.Interface
+	SysSrcMac     *net.HardwareAddr
+	RouterMac     *net.HardwareAddr
 
-// init initializes the network device.
+	once  sync.Once
+	mutex sync.RWMutex // Mutex to make shared variables thread-safe
+)
+
+// initialize initializes the network device and MAC addresses.
 func init() {
 	// Get the IP address of the current machine
 	SrcIP := GetSelfIP()
@@ -46,14 +52,18 @@ func init() {
 		for _, address := range dev.Addresses {
 			// Check if the IP address matches the source IP address
 			if address.IP.Equal(SrcIP) {
-				// Set the network device to the matching device and return
+				// Set the network device to the matching device
+				mutex.Lock()
 				NetworkDevice = &dev
+				mutex.Unlock()
 				return
 			}
 		}
 	}
 
 	// If no network device was found, panic with an error message
+	mutex.RLock()
+	defer mutex.RUnlock()
 	if NetworkDevice == nil {
 		panic("Network device not found")
 	}
@@ -84,8 +94,10 @@ func waitForMac(packetSource *gopacket.PacketSource) {
 						ethernet := ethernetLayer.(*layers.Ethernet)
 
 						// Set the source MAC address and the router MAC address
+						mutex.Lock()
 						SysSrcMac = &ethernet.SrcMAC
 						RouterMac = &ethernet.DstMAC
+						mutex.Unlock()
 						return
 					}
 				}
@@ -348,20 +360,23 @@ func OpenRawSocket(protocol ProtocolType) (RawSocket, error) {
 	// Flag to determine if IP raw mode is needed.
 	var ipRaw bool
 
-	// Update the MAC address.
-	if err := updateMac(handle); err != nil {
-		if strings.Contains(err.Error(), "mismatched hardware address sizes") {
-			ipRaw = true
-		}
-		// Panic if there is any other error.
-		panic(err)
-	}
-
 	source := gopacket.NewPacketSource(handle, handle.LinkType())
 	source.NoCopy = true
 	source.DecodeOptions = decodeOptions
 
-	waitForMac(source)
+	once.Do(func() {
+		// Update the MAC address.
+		if err := updateMac(handle); err != nil {
+			if strings.Contains(err.Error(), "mismatched hardware address sizes") {
+				ipRaw = true
+			}
+			// Panic if there is any other error.
+			panic(err)
+		}
+
+		// Wait for the MAC address to be set.
+		waitForMac(source)
+	})
 
 	// Create a new PcapSocket with the necessary parameters.
 	return newPcapSocket(ipRaw, handle, protocol, source), nil

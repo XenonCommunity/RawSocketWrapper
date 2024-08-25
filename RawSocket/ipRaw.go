@@ -4,7 +4,13 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
+)
+
+var (
+	selfIP net.IP
+	mx     sync.Mutex
 )
 
 // getIfaceIP returns the IP address of the first available network interface that is not loopback.
@@ -81,8 +87,6 @@ func requestIP() net.IP {
 	return net.ParseIP(ip)
 }
 
-var selfIP net.IP
-
 // GetSelfIP returns the IP address of the current machine.
 func GetSelfIP() net.IP {
 	// Check if selfIP has already been set
@@ -90,6 +94,10 @@ func GetSelfIP() net.IP {
 		// Return the previously set selfIP
 		return selfIP
 	}
+
+	// Lock the mutex
+	mx.Lock()
+	defer mx.Unlock()
 
 	// Get the IP address using the requestIP function
 	selfIP = requestIP()
